@@ -1,57 +1,105 @@
-exports.handler = async function http(req) {
+const io = require('socket.io')();
+const {initGame, gameLoop, getUpdatedVelocity} = require('./game');
+const {makeid} = require('./utils');
+const {FRAME_RATE} = require('./constants');
 
-  let html = `
-<!doctype html>
-<html lang=en>
-  <head>
-    <meta charset=utf-8>
-    <title>Hi!</title>
-    <link rel="stylesheet" href="https://static.begin.app/starter/default.css">
-    <link href="data:image/x-icon;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" rel="icon" type="image/x-icon">
-  </head>
-  <body>
+const state = {};
+const clientRooms = {};
 
-    <h1 class="center-text">
-      <!-- ↓ Change "Hello world!" to something else and head on back to Begin! -->
-      Hello world!
-    </h1>
+io.on('connection', (client) => {
 
-    <p class="center-text">
-      Your <a href="https://begin.com" class="link" target="_blank">Begin</a> app is ready to go!
-    </p>
+  client.on('keydown', handleKeydown);
+  client.on('newGame', handleNewGame);
+  client.on('joinGame', handleJoinGame);
 
-  </body>
-</html>`
+  function handleJoinGame(gameCode) {
+    const room = io.sockets.adapter.rooms[gameCode];
 
-  return {
-    headers: {
-      'content-type': 'text/html; charset=utf8',
-      'cache-control': 'no-cache, no-store, must-revalidate, max-age=0, s-maxage=0'
-    },
-    statusCode: 200,
-    body: html
+    let allUsers;
+    if (room) {
+      allUsers = room.sockets;
+    }
+
+    let numClients = 0;
+    if (allUsers) {
+      numClients = Object.keys(allUsers).length;
+    }
+
+    if (numClients === 0) {
+      client.emit('unknownGame');
+      return;
+    } else if (numClients > 1) {
+      client.emit('tooManyPlayers');
+      return;
+    }
+
+    clientRooms[client.id] = gameCode;
+
+    client.join(gameCode);
+    client.number = 2;
+    client.emit('init', 2);
+
+    startGameInterval(gameCode)
   }
+
+  function handleNewGame() {
+    let roomName = makeid(5);
+    clientRooms[client.id] = roomName;
+    client.emit('gameCode', roomName);
+
+    state[roomName] = initGame();
+
+    client.join(roomName);
+    client.number = 1;
+    client.emit('init', 1);
+  }
+
+  function handleKeydown(keyCode) {
+    const roomName = clientRooms[client.id];
+
+    if(!roomName) {
+      return;
+    }
+    try {
+      keyCode = parseInt(keyCode);
+    } catch (e) {
+      console.error(e);
+      return;
+    }
+
+    const vel = getUpdatedVelocity(keyCode);
+
+    if (vel) {
+      state[roomName].players[client.number - 1].vel = vel;
+    }
+  }
+
+
+});
+
+function startGameInterval(roomName) {
+  const intervalId = setInterval(() => {
+    const winner = gameLoop(state[roomName]);
+
+    if (!winner) {
+      emitGameState(roomName, state[roomName])
+      // client.emit('gameState', JSON.stringify(state));
+    } else {
+      emitGameOver(roomName, winner);
+      state[roomName] = null;
+      clearInterval(intervalId);
+    }
+  }, 2000
+    / FRAME_RATE);
 }
 
-// Other example responses
-
-/* Forward requester to a new path
-exports.handler = async function http (req) {
-  return {
-    statusCode: 302,
-    headers: {'location': '/about'}
-  }
+function emitGameState(roomName, state) {
+  io.sockets.in(roomName).emit('gameState', JSON.stringify(state));
 }
-*/
 
-/* Respond with successful resource creation, CORS enabled
-let arc = require('@architect/functions')
-exports.handler = arc.http.async (http)
-async function http (req) {
-  return {
-    statusCode: 201,
-    json: { ok: true },
-    cors: true,
-  }
+function emitGameOver(roomName, winner) {
+  io.sockets.in(roomName).emit('gameOver', JSON.stringify({winner}));
 }
-*/
+
+
+io.listen(3000);
